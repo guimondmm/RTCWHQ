@@ -1,6 +1,7 @@
 # Ignoring PyTorch models to reduce bandwidth usage
 # Acquire the .pth files on your own and place them in the models folder
-models/*.pth
+models/*
+!models/*.md5
 
 # Created by https://www.toptal.com/developers/gitignore/api/windows,macos,linux,python
 # Edit at https://www.toptal.com/developers/gitignore?templates=windows,macos,linux,python

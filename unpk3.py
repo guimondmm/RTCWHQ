@@ -6,16 +6,16 @@ import zipfile
 path=sys.argv[1]
 
 print("----------------------------------------------------------------------")
-print("Unpacking PK3s to separate folders in "+path)
+print("Unpacking archives to separate folders in "+path)
 print("----------------------------------------------------------------------")
 
 for path, dir_list, file_list in os.walk(path):
 
 	for file_name in file_list:
 	
-		if file_name.endswith(".pk3"):
+		if file_name.lower().endswith(".pk3") or file_name.lower().endswith(".zip"):
 		
-			print("UnPK3 "+file_name)
+			print(f"UN{file_name.upper()[-3:]} {file_name}")
 			
 			abs_file_path = os.path.join(path, file_name)
 
