@@ -30,10 +30,10 @@ cache = True                        # attempt to cache prepared models to speed 
 
 # VRAM limits 8GB
 largelimit = 2048*2048              # maximum texture scaling limit (stop scaling if texture is below this size)
-vramlimit = 0.99                    # maximum proportion of free VRAM to try to allocate to ESRGAN
-									# ESRGAN is ridiculously VRAM intensive, even compared to other GANs,
-									# e.g., a 1024px*1024px image would theoretically max out a 8.0GiB video card.
-									# Available VRAM is lower due to Desktop Window Manager and other app usage,
+vramlimit = 0.95                    # maximum proportion of free VRAM to try to allocate to ESRGAN
+									# ESRGAN is ridiculously VRAM intensive, even compared to other GANs.
+									# width * height >> 7 = required VRAM in MiB; e.g., 1024px * 1024px >> 7 = 8 GiB VRAM!!!
+									# Available VRAM is lower than total VRAM due to Desktop Window Manager and app usage,
 									# so free VRAM is queried from 'nvidia-smi.exe' then multiplied by this value.
 							
 # Predefined Values
@@ -41,7 +41,7 @@ target = 'cuda'                     # ESRGAN target device: 'cuda' for nVidia ca
 modelfactor = 4                     # the scale the selected model has been trained on (default is 4x)
 allowed = [".png",".tga",".jpg",".bmp",".dds"]    # allowed image file extensions to process (default: PNG, TGA, JPG)
 downscaling = Image.LANCZOS         # scaling method reducing the highres image to the desired resolution
-downfactor = 2                      # downscale the final images by this factor in each direction using the downscaling scaling method,
+# downfactor = 2                      # downscale the final images by this factor in each direction using the downscaling scaling method,
 									# because, imho, results aren't that sharp at 4x, so it's a massive waste of disk space (1 = disable)
 
 # Predefined ESRGAN Models
@@ -122,19 +122,37 @@ def fitimage(width, height, available_vram_banks):
 
 	# reduce image size by factor 2
 	while(width*height>available_vram_banks):
-		width=int(width/2)
-		height=int(height/2)
+		width = width >> 1
+		height = height >> 1
 
 	write_log("  - Image resized to "+str(width)+"x"+str(height))
 		
 	return width
 
+# calculate the number of slices required to make smaller chunks of the image fit in VRAM (same number vertically and horizontally)
+def calculate_slices(width, height, available_vram_banks):
+	block_width, block_height, steps = width, height, 0
+	# while 289 * block_width * block_height >> 8 > available_vram_banks: # take into account 1/16th extra in each direction for stitching?
+	while block_width * block_height > available_vram_banks: # no overlap (stitching artifacts?)
+		steps += 1
+		block_width, block_height = width >> steps, height >> steps # halve block size in each direction
+	# print(f"  - Subdivided into {1 << (steps << 1)} blocks of size {block_width}x{block_height}")
+	return 1 << steps # if there is less than, say, 8 MiB of free VRAM, this could produce patches that are too small
+
+# subdivide image in n*n blocks of equal (or nearly equal) size, from left to right, top to bottom
+def split_image(im, n=2):
+	return [np.array_split(a, n, axis=1) for a in np.array_split(np.asarray(im), n, axis=0)]
+
+# stitch image blocks back together after individual processing, i.e. the opposite of split_image()
+def stitch_image(grid):
+	return Image.fromarray(np.concatenate([np.concatenate(a, axis=1) for a in grid], axis=0), mode=None)
+
 def gpu_stats():
 	nvsmi = [
-	'C:\\Program Files\\NVIDIA Corporation\\NVSMI\\nvidia-smi.exe',
-	'--format=csv,nounits', # header will be used as dict keys
-	'--query-gpu=memory.total,memory.used,memory.free', # "nvidia-smi --help-query-gpu" for list of available properties
-	'--id=0' # 0 = default GPU; may need changing if multiple GPUs or integrated graphics
+		'C:\\Program Files\\NVIDIA Corporation\\NVSMI\\nvidia-smi.exe',
+		'--format=csv,nounits', # header will be used as dict keys
+		'--query-gpu=memory.total,memory.used,memory.free', # "nvidia-smi --help-query-gpu" for list of available properties
+		'--id=0' # 0 = default GPU; may need changing if multiple GPUs or integrated graphics
 	]
 	stats = subprocess.run(nvsmi, capture_output=True)
 	keys, values = stats.stdout.decode().splitlines() # comma-separated values
@@ -189,7 +207,7 @@ for counter in sorted(file_counters.items(), key=lambda i: i[1], reverse=True):
 # init model
 if(testmode==False):
 	write_log("----------------------------------------------------------------------")
-	write_log(f"Preparing the PyTorch models...{'' if cache else ' (this may take a while!)'}")
+	write_log("Preparing the PyTorch models... (first run may take a while!)")
 
 	device_cuda = torch.device("cuda")
 	device_cpu = torch.device("cpu")
@@ -254,7 +272,7 @@ if(testmode==False):
 starttime=time.time()
 cnt=0
 dcnt=0
-	
+
 # iterate through all subfolders
 for dirName, subdirList, fileList in os.walk(input, topdown=False):
 
@@ -382,7 +400,7 @@ for dirName, subdirList, fileList in os.walk(input, topdown=False):
 				
 				# initial check if image is already too large: reduce it before enlargement
 				process=True
-				available_vram_banks = int(gpu_stats()['memory.free'] * vramlimit) << 7 # because width*height*8192 = vram*1024**2 => width*height<<13 = vram<<20 => width*height = vram<<7
+				available_vram_banks = int(gpu_stats()['memory.free'] * vramlimit) << 7 # because width*height*8192 = vram*1024**2 => width*height<<13 = vram<<20 => width*height>>7 = vram
 				if(scalelarge==True):
 					if(width*height > available_vram_banks):
 						write_log(f"  - Image too large, must be resized first")
@@ -408,7 +426,7 @@ for dirName, subdirList, fileList in os.walk(input, topdown=False):
 				if(process==True):
 					
 					# resize image until it is large enough (change the largelimit var to a lower value if it crashes)
-					while(width*height<largelimit and rescale==True):
+					if(rescale==True):
 					
 						write_log("- Scale Pass #"+str(scalepass))
 
@@ -426,7 +444,7 @@ for dirName, subdirList, fileList in os.walk(input, topdown=False):
 						# You must add to this value the VRAM already assigned by Windows and Apps, which
 						# can already take 2-3GB on 8GB VRAM, consider this
 						# -------------------------------------------------------------------------------
-						if((width*height)>available_vram_banks):
+						# if((width*height)>available_vram_banks):
 							# write_log("  - Image doesn't fit in VRAM, must be resized")
 							
 							# aspect=width/height
@@ -436,32 +454,51 @@ for dirName, subdirList, fileList in os.walk(input, topdown=False):
 							# im=im.resize((width,height),downscaling)
 							# if(alpha):
 							# 	alpha=alpha.resize((width,height),Image.LANCZOS)
-							write_log("  - Image doesn't fit in VRAM; will be processed by CPU")
-							write_log(f"    - available: {available_vram_banks >> 7} MiB")
-							write_log(f"    - required:  {width*height >> 7} MiB")
-							device = device_cpu
-							model = model_cpu
-						else:
-							device = device_cuda
-							model = model_cuda
 
+						# 	device = device_cpu
+						# 	model = model_cpu
+						# else:
+						# 	device = device_cuda
+						# 	model = model_cuda
+
+						device = device_cuda
+						model = model_cuda
 
 						# scale color image
-						width=width*modelfactor
-						height=height*modelfactor
-						write_log("  - ERSGAN scales Colormap to "+str(width)+"x"+str(height))
-						if(testmode==False):
-							im=Image.fromarray(upscale(im,device,model))
-						else:
-							im=im.resize((width*modelfactor,height*modelfactor),downscaling)
+						write_log(f"  - ERSGAN scales Colormap to {width*modelfactor}x{height*modelfactor}")
+						# if(testmode==False):
+						# 	im=Image.fromarray(upscale(im,device,model))
+						# else:
+						# 	im=im.resize((width*modelfactor,height*modelfactor),downscaling)
+
+						slices = calculate_slices(width, height, available_vram_banks)
+						if slices > 1:
+							print(f"Image too big for available VRAM ({width*height >> 7} MiB > {available_vram_banks >> 7} MiB)")
+							print(f"Image will be subdivided in {slices**2} blocks of size {width//slices}x{height//slices}")
+
+						grid = split_image(im, n=slices)
+						for i, row in enumerate(grid):
+							for j, block in enumerate(row):
+								print(f"\rColor block {str(i*len(grid)+j+1).rjust(len(str(slices**2)))} of {slices**2}... ", end="", flush=True) # progress counter
+								grid[i][j] = upscale(block,device,model)
+						print("Done.")
+						im = stitch_image(grid)
 						
 						# scale alpha channel
 						if(alpha):
-							write_log("  - ERSGAN scales Alphamap to "+str(width)+"x"+str(height))
-							if(testmode==False):
-								alpha=Image.fromarray(upscale(alpha,device,model))
-							else:
-								alpha=alpha.resize((width*modelfactor,height*modelfactor),downscaling)
+							write_log(f"  - ERSGAN scales Alphamap to {width*modelfactor}x{height*modelfactor}")
+							# if(testmode==False):
+							# 	alpha=Image.fromarray(upscale(alpha,device,model))
+							# else:
+							# 	alpha=alpha.resize((width*modelfactor,height*modelfactor),downscaling)
+
+							grid = split_image(alpha, n=slices)
+							for i, row in enumerate(grid):
+								for j, block in enumerate(row):
+									print(f"\rAlpha block {str(i*len(grid)+j+1).rjust(len(str(slices**2)))} of {slices**2}... ", end="", flush=True) # progress counter
+									grid[i][j] = upscale(block,device,model)
+							print("Done.")
+							alpha = stitch_image(grid)
 							
 						# image has target size? don't rescale anymore
 						if(width==(ow*factor) and height==(oh*factor)):
@@ -533,20 +570,20 @@ for dirName, subdirList, fileList in os.walk(input, topdown=False):
 							write_log("- Colormap: Sharpen")
 							im=ImageEnhance.Sharpness(im).enhance(sh)
 							
-					# if texture size is too large? reduce by factor
-					if(nsw>ms) or (nsh>ms):
-						f=min(ms/nsw,ms/nsh) // downfactor
-						sw=int(nsw*f)
-						sh=int(nsh*f)
-					# or use the calculated values
-					else:
-						sw=nsw // downfactor
-						sh=nsh // downfactor
+					# # if texture size is too large? reduce by factor
+					# if(nsw>ms) or (nsh>ms):
+					# 	f=min(ms/nsw,ms/nsh) // downfactor
+					# 	sw=int(nsw*f)
+					# 	sh=int(nsh*f)
+					# # or use the calculated values
+					# else:
+					# 	sw=nsw // downfactor
+					# 	sh=nsh // downfactor
 								
-					# scale colormap to desired resolution
-					if sw != nsw or sh != nsh:
-						write_log("- Colormap: downscaled to "+str(sw)+"x"+str(sh))
-						im=im.resize((sw,sh),downscaling)
+					# # scale colormap to desired resolution
+					# if sw != nsw or sh != nsh:
+					# 	write_log("- Colormap: downscaled to "+str(sw)+"x"+str(sh))
+					# 	im=im.resize((sw,sh),downscaling)
 						
 					# scae alphamap, if there is alpha
 					if(alpha):
@@ -572,10 +609,10 @@ for dirName, subdirList, fileList in os.walk(input, topdown=False):
 								write_log("- Alphamap: Contrast")
 								alpha = ImageEnhance.Contrast(alpha).enhance(1.0+co)
 						
-						# scale alpha to desired resolution
-						if sw != nsw or sh != nsh:
-							write_log("- Alphamap scaled to "+str(sw)+"x"+str(sh))
-							alpha=alpha.resize((sw,sh),downscaling)
+						# # scale alpha to desired resolution
+						# if sw != nsw or sh != nsh:
+						# 	write_log("- Alphamap scaled to "+str(sw)+"x"+str(sh))
+						# 	alpha=alpha.resize((sw,sh),downscaling)
 
 						# merge alpha channel with RGB
 						write_log("- Merging Colormap with Alphamap")
