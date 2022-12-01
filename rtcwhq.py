@@ -1,3 +1,4 @@
+import traceback                    # LIB: stack traceback
 import json                         # LIB: JSON parser
 import pickle                       # LIB: binary serialization
 import sys                          # LIB: System
@@ -46,7 +47,7 @@ downscaling = Image.LANCZOS         # scaling method reducing the highres image 
 
 # Predefined ESRGAN Models
 default_model = 'cartoonpainted_400000.pth'       # default model
-font_model = 'ReducedColorsAttempt.pth'     # font model
+bc1_model = '1xBC1NoiseAgressiveTake3_400000_G.pth'     # font model
 
 # RTCW exclude files (not implemented yet)
 excludes = ["gfx/2d/backtile.jpg"]  # ET: gives a strange background texture in the loading screen, should be black
@@ -71,6 +72,7 @@ def remove_empty_dir(path):
 		if(os.rmdir(path)):
 			write_log("Removed: " + path)
 	except OSError:
+		traceback.print_exc(file=sys.stderr)
 		write_log("Not removed: " + path)
 		pass
 
@@ -82,13 +84,17 @@ def remove_empty_dirs(path):
 
 # function: upscale a PNG image
 def upscale(im, device, model):
-	img = cv2.cvtColor(np.array(im), cv2.COLOR_RGB2BGR)
+	img = cv2.cvtColor(np.asarray(im), cv2.COLOR_RGB2BGR)
 	img = img * 1.0 / 255
 	img = torch.from_numpy(np.transpose(img[:, :, [2, 1, 0]], (2, 0, 1))).float()
 	img_LR = img.unsqueeze(0)
 	img_LR = img_LR.to(device)
 	output = model(img_LR).data.squeeze().float().cpu().clamp_(0, 1).numpy()
-	output = np.transpose(output[[2, 1, 0], :, :], (1, 2, 0))
+	try:
+		output = np.transpose(output[[2, 1, 0], :, :], (1, 2, 0))
+	except IndexError: # workaround for rare issue with broken DDS textures
+		traceback.print_exc(file=sys.stderr)
+		return np.asarray(im)
 	output = (output * 255.0).round()
 	output = cv2.cvtColor(output, cv2.COLOR_BGR2RGB)	
 	return output.astype(np.uint8)
@@ -185,7 +191,7 @@ write_log("=====================================================================
 write_log("RTCWHQ batch upscaling with ERSGAN started")
 write_log("======================================================================")
 write_log(f"Model:           {os.path.join('models', default_model)}")
-write_log(f"Fontmodel:       {os.path.join('models', font_model)}")
+write_log(f"DirectX model:   {os.path.join('models', bc1_model)}")
 write_log(f"Folder:          {input}")
 write_log(f"Maximum scaling: {factor}x")
 write_log(f"Maximum size:    {maxsize}px")
@@ -235,27 +241,49 @@ if(testmode==False):
 				pickle.dump(model_cuda, c)
 			write_log("CUDA model saved to disk.")
 
-	# read prepared cpu model from cache if available:
-	model_cpu_cache = os.path.join('models', os.path.splitext(default_model)[0]+'.cpu')
-	if cache and os.path.isfile(model_cpu_cache):
-		with open(model_cpu_cache, 'rb') as c:
-			model_cpu = pickle.load(c)
-		write_log("CPU model loaded from disk.")
+	# read prepared bc1 cuda model from cache if available:
+	bc1_model_cuda_cache = os.path.join('models', os.path.splitext(bc1_model)[0]+'.cuda')
+	if cache and os.path.isfile(bc1_model_cuda_cache):
+		with open(bc1_model_cuda_cache, 'rb') as c:
+			bc1_model_cuda = pickle.load(c)
+		write_log("DirectX CUDA model loaded from disk.")
 	else:
-		# prepare cpu model
-		model_cpu = arch.RRDB_Net(3, 3, 64, 23, gc=32, upscale=4, norm_type=None, act_type='leakyrelu', mode='CNA', res_scale=1, upsample_mode='upconv')
-		model_cpu.load_state_dict(torch.load(os.path.join('models', default_model)), strict=True)
-		model_cpu.eval()
+		# prepare cuda model
+		bc1_model_cuda = arch.RRDB_Net(3, 3, 64, 23, gc=32, upscale=1, norm_type=None, act_type='leakyrelu', mode='CNA', res_scale=1, upsample_mode='upconv')
+		bc1_model_cuda.load_state_dict(torch.load(os.path.join('models', bc1_model)), strict=True)
+		bc1_model_cuda.eval()
 
-		for k, v in model_cpu.named_parameters():
+		for k, v in bc1_model_cuda.named_parameters():
 			v.requires_grad = False
-			model_cpu = model_cpu.to(device_cpu)
-		write_log("CPU model ready.")
+			bc1_model_cuda = bc1_model_cuda.to(device_cuda)
+		write_log("DirectX CUDA model ready.")
 
 		if cache:
-			with open(model_cpu_cache, 'wb') as c:
-				pickle.dump(model_cpu, c)
-			write_log("CPU model saved to disk.")
+			with open(bc1_model_cuda_cache, 'wb') as c:
+				pickle.dump(bc1_model_cuda, c)
+			write_log("DirectX CUDA model saved to disk.")
+
+	# # read prepared cpu model from cache if available:
+	# model_cpu_cache = os.path.join('models', os.path.splitext(default_model)[0]+'.cpu')
+	# if cache and os.path.isfile(model_cpu_cache):
+	# 	with open(model_cpu_cache, 'rb') as c:
+	# 		model_cpu = pickle.load(c)
+	# 	write_log("CPU model loaded from disk.")
+	# else:
+	# 	# prepare cpu model
+	# 	model_cpu = arch.RRDB_Net(3, 3, 64, 23, gc=32, upscale=4, norm_type=None, act_type='leakyrelu', mode='CNA', res_scale=1, upsample_mode='upconv')
+	# 	model_cpu.load_state_dict(torch.load(os.path.join('models', default_model)), strict=True)
+	# 	model_cpu.eval()
+
+	# 	for k, v in model_cpu.named_parameters():
+	# 		v.requires_grad = False
+	# 		model_cpu = model_cpu.to(device_cpu)
+	# 	write_log("CPU model ready.")
+
+	# 	if cache:
+	# 		with open(model_cpu_cache, 'wb') as c:
+	# 			pickle.dump(model_cpu, c)
+	# 		write_log("CPU model saved to disk.")
 
 	# # prepare font model
 	# fontmodel = arch.RRDB_Net(3, 3, 64, 23, gc=32, upscale=4, norm_type=None, act_type='leakyrelu', mode='CNA', res_scale=1, upsample_mode='upconv')
@@ -273,6 +301,12 @@ starttime=time.time()
 cnt=0
 dcnt=0
 
+last_filename_before_crash = None
+if os.path.isfile("last_filename_before_crash.log"):
+	with open("last_filename_before_crash.log", "r") as f:
+		last_filename_before_crash = f.read().strip() # in case of unhandled crash, to avoid reprocessing entire input folder (fixme: could be better implemented)
+	os.remove("last_filename_before_crash.log")
+
 # iterate through all subfolders
 for dirName, subdirList, fileList in os.walk(input, topdown=False):
 
@@ -289,387 +323,408 @@ for dirName, subdirList, fileList in os.walk(input, topdown=False):
 		os.chmod(path ,stat.S_IWRITE)
 		filename,ext=splitext(fname)
 		ext=ext.lower()
+
+		# add path and extension to filename (the flow of the original code is so messy! argh!)
+		fullname=dirName + "\\" + filename + ext
+
+		try: # generic unhandled crash handler, part 1 (fixme: that's really sloppy! don't do this!)
 		
-		# only convert allowed file extensions
-		if ext in allowed:
-			
-			# open image, add extension to filename and save it to PNG
-			fullname=dirName + "\\" + filename + ext
-			
-			# try to load the image or throw error if there is a problem
-			try:
-				im = Image.open(fullname)
-				loaded=True
-				width, height = im.size
-				width=int(width)
-				height=int(height)
-				imode=im.mode
-				cnt+=1
+			# only convert allowed file extensions
+			if ext in allowed:
 
-			# image could not open? error!
-			except IOError:
-				loaded=False
-				delete=True
-				delreason="could not open image"
-				im.close()
-			
-			# skip tracemap if set
-			if(skiptracemap==True and "_tracemap" in filename):
-				loaded=False
-				delete=True
-				delreason="tracemaps not allowed"
-				im.close()
-						
-			# skip lightmaps if set
-			if(scalelightmaps==False and "lm_0" in filename):
-				loaded=Fals
-				delete=True
-				delreason="lightmaps not allowed"
-				im.close()
-						
-			# loading successful? check colormode first!
-			if(loaded==True):
-						
-				write_log("----------------------------------------------------------------------")
-				write_log(f"IMAGE {cnt} of {sum(file_counters.values())}: {fullname}")
-				write_log("----------------------------------------------------------------------")
-				stime=time.time()
-				
-				add="unknown"
-				if(imode=="L"):
-					add="RGB 8bit Greyscale"
-				
-				if(imode=="P"):
-					add="RGB 8bit Palette"
+				cnt+=1 # moved count increment here because otherwise it wouldn't be incremented when there's an error opening the file...
 
-				if(imode=="RGB"):
-					add="RGB 24bit"
+				if last_filename_before_crash:
+					if fullname == last_filename_before_crash:
+						last_filename_before_crash = None # skipped enough files
+					continue # skip already processed images if unhandled crash (fixme: ugly workaround)
+				
+				# try to load the image or throw error if there is a problem
+				try:
+					im = Image.open(fullname)
+					loaded=True
+					width, height = im.size
+					width=int(width)
+					height=int(height)
+					imode=im.mode
+
+				# image could not open? error!
+				except (IOError, NotImplementedError):
+					traceback.print_exc(file=sys.stderr)
+					loaded=False
+					delete=True
+					delreason="could not open image"
+					im.close()
+				
+				# skip tracemap if set
+				if(skiptracemap==True and "_tracemap" in filename):
+					loaded=False
+					delete=True
+					delreason="tracemaps not allowed"
+					im.close()
+							
+				# skip lightmaps if set
+				if(scalelightmaps==False and "lm_0" in filename):
+					loaded=Fals
+					delete=True
+					delreason="lightmaps not allowed"
+					im.close()
+							
+				# loading successful? check colormode first!
+				if(loaded==True):
+							
+					write_log("----------------------------------------------------------------------")
+					write_log(f"IMAGE {cnt} of {sum(file_counters.values())}: {fullname}")
+					write_log("----------------------------------------------------------------------")
+					stime=time.time()
 					
-				if(imode=="RGBA"):
-					add="RGB 32bit with Alpha Channel"
-				
-				write_log("- Colormode: "+add)
+					add="unknown"
+					if(imode=="L"):
+						add="RGB 8bit Greyscale"
+					
+					if(imode=="P"):
+						add="RGB 8bit Palette"
 
-				# image is NOT RGB(A)? then try to convert it
-				if(autoconvert==True and imode != 'RGBA' and imode != 'RGB'):
-				
-					# 8bit color palette/greyscale? then convert to 24bit RGB
-					if(imode=="P" or imode=="L"):
-						im2=Image.new("RGB",im.size)
-						im2.paste(im)
-						im=im2
-						im2=None
-						write_log("- NOTICE: 8bit converted to 24bit RGB")
+					if(imode=="RGB"):
+						add="RGB 24bit"
+						
+					if(imode=="RGBA"):
+						add="RGB 32bit with Alpha Channel"
+					
+					write_log("- Colormode: "+add)
+
+					# image is NOT RGB(A)? then try to convert it
+					if(autoconvert==True and imode != 'RGBA' and imode != 'RGB'):
+					
+						# 8bit color palette/greyscale? then convert to 24bit RGB
+						if(imode=="P" or imode=="L"):
+							im2=Image.new("RGB",im.size)
+							im2.paste(im)
+							im=im2
+							im2=None
+							write_log("- NOTICE: 8bit converted to 24bit RGB")
+						else:
+							# image was not valid, skip
+							loaded=False
+							delete=True
+							delreason="no valid image"
+							im.close()
+							
+				# still a valid image? then process it
+				if(loaded==True):
+					
+					# optional: check and correct textures which are NOT power of two size (can cause errors otherwise)
+					if(powertwo):
+
+						twow=poweroftwo(width)
+						twoh=poweroftwo(height)
+						
+						# width/height doesn't match with calculated power of two value? correct it = resize to next power of two
+						if (twow != width) or (twoh != height):
+							write_log("- NOTICE: Texture size "+str(width)+"x"+str(height)+" corrected - was NOT power of two!")
+							width=twow
+							height=twoh
+							im.resize((width,height),Image.LANCZOS)
+					
+					# store original width for later use
+					ow=width
+					oh=height
+
+					# if exists, get alpha channel first before we mess with the original image
+					alpha=None
+					if im.mode in ('RGBA', 'LA') or (im.mode == 'P' and 'transparency' in im.info):
+						try:
+							alpha=im.split()[-1]
+							# convert to RGB to work with ESRGAN
+							alpha = alpha.convert("RGB")
+						except ValueError:
+							traceback.print_exc(file=sys.stderr)
+							continue
+						
+					scalepass=1
+					
+					write_log("- Resolution: "+str(width)+"x"+str(height)+" ("+str(factor)+"x = "+str(width*factor)+"x"+str(height*factor)+")")
+					
+					# initial check if image is already too large: reduce it before enlargement
+					process=True
+					available_vram_banks = int(gpu_stats()['memory.free'] * vramlimit) << 7 # because width*height*8192 = vram*1024**2 => width*height<<13 = vram<<20 => width*height>>7 = vram
+					if(scalelarge==True):
+						if(width*height > available_vram_banks):
+							write_log(f"  - Image too large, must be resized first")
+							write_log(f"    - available: {available_vram_banks >> 7} MiB")
+							write_log(f"    - required:  {width*height >> 7} MiB")
+							aspect=width/height
+							width=fitimage(width,height,available_vram_banks)
+							height=int(width/aspect)				
+
+							im=im.resize((width,height),downscaling)
+							if(alpha):
+								alpha=alpha.resize((width,height),Image.LANCZOS)
+					# simple check if the image needs processing or not
 					else:
-						# image was not valid, skip
-						loaded=False
-						delete=True
-						delreason="no valid image"
-						im.close()
-						
-			# still a valid image? then process it
-			if(loaded==True):
-				
-				# optional: check and correct textures which are NOT power of two size (can cause errors otherwise)
-				if(powertwo):
-
-					twow=poweroftwo(width)
-					twoh=poweroftwo(height)
-					
-					# width/height doesn't match with calculated power of two value? correct it = resize to next power of two
-					if (twow != width) or (twoh != height):
-						write_log("- NOTICE: Texture size "+str(width)+"x"+str(height)+" corrected - was NOT power of two!")
-						width=twow
-						height=twoh
-						im.resize((width,height),Image.LANCZOS)
-				
-				# store original width for later use
-				ow=width
-				oh=height
-
-				# if exists, get alpha channel first before we mess with the original image
-				alpha=None
-				if im.mode in ('RGBA', 'LA') or (im.mode == 'P' and 'transparency' in im.info):
-					alpha=im.split()[-1]
-					# convert to RGB to work with ESRGAN
-					alpha = alpha.convert("RGB")
-					
-				scalepass=1
-				
-				write_log("- Resolution: "+str(width)+"x"+str(height)+" ("+str(factor)+"x = "+str(width*factor)+"x"+str(height*factor)+")")
-				
-				# initial check if image is already too large: reduce it before enlargement
-				process=True
-				available_vram_banks = int(gpu_stats()['memory.free'] * vramlimit) << 7 # because width*height*8192 = vram*1024**2 => width*height<<13 = vram<<20 => width*height>>7 = vram
-				if(scalelarge==True):
-					if(width*height > available_vram_banks):
-						write_log(f"  - Image too large, must be resized first")
-						write_log(f"    - available: {available_vram_banks >> 7} MiB")
-						write_log(f"    - required:  {width*height >> 7} MiB")
-						aspect=width/height
-						width=fitimage(width,height,available_vram_banks)
-						height=int(width/aspect)				
-
-						im=im.resize((width,height),downscaling)
-						if(alpha):
-							alpha=alpha.resize((width,height),Image.LANCZOS)
-				# simple check if the image needs processing or not
-				else:
-					if(width*height>=maxsize*maxsize):
-						write_log("- no processing: image is already High Resolution")
-						process=False
-						
-				# assume we're rescaling the image
-				rescale=True
-				
-				# process images if necessary
-				if(process==True):
-					
-					# resize image until it is large enough (change the largelimit var to a lower value if it crashes)
-					if(rescale==True):
-					
-						write_log("- Scale Pass #"+str(scalepass))
-
-						# -------------------------------------------------------------------------------
-						# Image is too large to scale? reduce size by factor two until the size is valid
-						# according to VRAM limit.
-						#
-						# Notice: ESRGAN uses a lot of GPU VRAM so there is a limitation for the input
-						# depending on the available VRAM. An estimated maximum value for 8GB VRAM is
-						# about 1024x512 = 524288 Pixels, so change the available_vram_banks variable if you have
-						# more or less than 8GB VRAM. An approximate formula to calculate the size:
-						#
-						# VRAM needed = width*height*8192 in Bytes
-						#
-						# You must add to this value the VRAM already assigned by Windows and Apps, which
-						# can already take 2-3GB on 8GB VRAM, consider this
-						# -------------------------------------------------------------------------------
-						# if((width*height)>available_vram_banks):
-							# write_log("  - Image doesn't fit in VRAM, must be resized")
+						if(width*height>=maxsize*maxsize):
+							write_log("- no processing: image is already High Resolution")
+							process=False
 							
-							# aspect=width/height
-							# width=fitimage(width,height,available_vram_banks)
-							# height=int(width/aspect)
-							
-							# im=im.resize((width,height),downscaling)
-							# if(alpha):
-							# 	alpha=alpha.resize((width,height),Image.LANCZOS)
-
-						# 	device = device_cpu
-						# 	model = model_cpu
-						# else:
-						# 	device = device_cuda
-						# 	model = model_cuda
-
-						device = device_cuda
-						model = model_cuda
-
-						# scale color image
-						write_log(f"  - ERSGAN scales Colormap to {width*modelfactor}x{height*modelfactor}")
-						# if(testmode==False):
-						# 	im=Image.fromarray(upscale(im,device,model))
-						# else:
-						# 	im=im.resize((width*modelfactor,height*modelfactor),downscaling)
-
-						slices = calculate_slices(width, height, available_vram_banks)
-						if slices > 1:
-							print(f"Image too big for available VRAM ({width*height >> 7} MiB > {available_vram_banks >> 7} MiB)")
-							print(f"Image will be subdivided in {slices**2} blocks of size {width//slices}x{height//slices}")
-
-						grid = split_image(im, n=slices)
-						for i, row in enumerate(grid):
-							for j, block in enumerate(row):
-								print(f"\rColor block {str(i*len(grid)+j+1).rjust(len(str(slices**2)))} of {slices**2}... ", end="", flush=True) # progress counter
-								grid[i][j] = upscale(block,device,model)
-						print("Done.")
-						im = stitch_image(grid)
+					# assume we're rescaling the image
+					rescale=True
+					
+					# process images if necessary
+					if(process==True):
 						
-						# scale alpha channel
-						if(alpha):
-							write_log(f"  - ERSGAN scales Alphamap to {width*modelfactor}x{height*modelfactor}")
-							# if(testmode==False):
-							# 	alpha=Image.fromarray(upscale(alpha,device,model))
+						# resize image until it is large enough (change the largelimit var to a lower value if it crashes)
+						if(rescale==True):
+						
+							write_log("- Scale Pass #"+str(scalepass))
+
+							# -------------------------------------------------------------------------------
+							# Image is too large to scale? reduce size by factor two until the size is valid
+							# according to VRAM limit.
+							#
+							# Notice: ESRGAN uses a lot of GPU VRAM so there is a limitation for the input
+							# depending on the available VRAM. An estimated maximum value for 8GB VRAM is
+							# about 1024x512 = 524288 Pixels, so change the available_vram_banks variable if you have
+							# more or less than 8GB VRAM. An approximate formula to calculate the size:
+							#
+							# VRAM needed = width*height*8192 in Bytes
+							#
+							# You must add to this value the VRAM already assigned by Windows and Apps, which
+							# can already take 2-3GB on 8GB VRAM, consider this
+							# -------------------------------------------------------------------------------
+							# if((width*height)>available_vram_banks):
+								# write_log("  - Image doesn't fit in VRAM, must be resized")
+								
+								# aspect=width/height
+								# width=fitimage(width,height,available_vram_banks)
+								# height=int(width/aspect)
+								
+								# im=im.resize((width,height),downscaling)
+								# if(alpha):
+								# 	alpha=alpha.resize((width,height),Image.LANCZOS)
+
+							# 	device = device_cpu
+							# 	model = model_cpu
 							# else:
-							# 	alpha=alpha.resize((width*modelfactor,height*modelfactor),downscaling)
+							# 	device = device_cuda
+							# 	model = model_cuda
 
-							grid = split_image(alpha, n=slices)
+							device = device_cuda
+							model = model_cuda
+
+							# scale color image
+							write_log(f"  - ERSGAN scales Colormap to {width*modelfactor}x{height*modelfactor}")
+							# if(testmode==False):
+							# 	im=Image.fromarray(upscale(im,device,model))
+							# else:
+							# 	im=im.resize((width*modelfactor,height*modelfactor),downscaling)
+
+							slices = calculate_slices(width, height, available_vram_banks)
+							if slices > 1:
+								print(f"Image too big for available VRAM ({width*height >> 7} MiB > {available_vram_banks >> 7} MiB)")
+								print(f"Image will be subdivided in {slices**2} blocks of size {width//slices}x{height//slices}")
+
+							grid = split_image(im, n=slices)
 							for i, row in enumerate(grid):
 								for j, block in enumerate(row):
-									print(f"\rAlpha block {str(i*len(grid)+j+1).rjust(len(str(slices**2)))} of {slices**2}... ", end="", flush=True) # progress counter
+									print(f"\rColor block {str(i*len(grid)+j+1).rjust(len(str(slices**2)))} of {slices**2}... ", end="", flush=True) # progress counter
+									if ext.lower() == ".dds": 
+										upscale(block,device,bc1_model_cuda) # fixme: dds textures prefilter
 									grid[i][j] = upscale(block,device,model)
 							print("Done.")
-							alpha = stitch_image(grid)
+							im = stitch_image(grid)
 							
-						# image has target size? don't rescale anymore
-						if(width==(ow*factor) and height==(oh*factor)):
-							rescale=False
-						# otherwise do the next scale pass
-						else:
-							scalepass+=1
-												
-					# calculate final texture size
-					nsw=int(ow*factor)
-					nsh=int(oh*factor)
-					ms=maxsize
-					bl=blur
-					co=contrast
-					br=brightness
-					sh=sharpen
-					
-					# rtcw/et excludes and default settings for specific folder names
-					if(rtcwexcludes):
+							# scale alpha channel
+							if(alpha):
+								write_log(f"  - ERSGAN scales Alphamap to {width*modelfactor}x{height*modelfactor}")
+								# if(testmode==False):
+								# 	alpha=Image.fromarray(upscale(alpha,device,model))
+								# else:
+								# 	alpha=alpha.resize((width*modelfactor,height*modelfactor),downscaling)
 
-						# limit general font size to 1024 and use different values for blur/contrast/brightness/sharpen
-						if("font" in dirName):
-							ms=1024
-							sh=4
-							bl=1
-							co=2.0
-							br=-0.5
-							write_log("- Font Texture found, limiting size to "+str(ms)+" Pixel")
-							
-						# limit ET HUD font size to 1024 and use different values for blur/contrast/brightness/sharpen
-						if("hudchars" in filename):
-							ms=1024
-							sh=4
-							bl=0
-							co=4.0
-							br=-0.5
-							write_log("- Font Texture found, limiting size to "+str(ms)+" Pixel")
-							
-						# limit leveshots image size to 1024
-						if("levelshots" in dirName):
-							ms=512
-							# but the survey map can still be large
-							if("_cc") in filename:
-								ms=maxsize
-							write_log("- Levelshot Texture found, limiting size to "+str(ms)+" Pixel")
-						
-						# limit lightmaps image size to 1024
-						if("maps" in dirName):
-							ms=1024
-							write_log("- Lightmap Texture found, limiting size to "+str(ms)+" Pixel")
-						
-						# dont' add contrast to the skies and user different blur value
-						folders=["skies","sfx","liquids"]
-						if(dirName in folders):
-						#if(("skies" in dirName) or ("sfx" in dirName) or ("liquids" in dirName)):
-							co=0.0
-							br=0.0
-							bl=2
-							write_log("- Blurry Alpha Texture found - no contrast or brightness change!")
-
-
-					# optional: sharpen filter
-					if(usesharpen and sh!=0):
-						
-						# don't sharpen lightmaps!
-						if ("maps" in dirName):				
-							write_log("- Lightmap texture found, no sharpen on lightmaps")
-						else:
-							write_log("- Colormap: Sharpen")
-							im=ImageEnhance.Sharpness(im).enhance(sh)
-							
-					# # if texture size is too large? reduce by factor
-					# if(nsw>ms) or (nsh>ms):
-					# 	f=min(ms/nsw,ms/nsh) // downfactor
-					# 	sw=int(nsw*f)
-					# 	sh=int(nsh*f)
-					# # or use the calculated values
-					# else:
-					# 	sw=nsw // downfactor
-					# 	sh=nsh // downfactor
+								grid = split_image(alpha, n=slices)
+								for i, row in enumerate(grid):
+									for j, block in enumerate(row):
+										print(f"\rAlpha block {str(i*len(grid)+j+1).rjust(len(str(slices**2)))} of {slices**2}... ", end="", flush=True) # progress counter
+										grid[i][j] = upscale(block,device,model)
+								print("Done.")
+								alpha = stitch_image(grid)
 								
-					# # scale colormap to desired resolution
-					# if sw != nsw or sh != nsh:
-					# 	write_log("- Colormap: downscaled to "+str(sw)+"x"+str(sh))
-					# 	im=im.resize((sw,sh),downscaling)
+							# image has target size? don't rescale anymore
+							if(width==(ow*factor) and height==(oh*factor)):
+								rescale=False
+							# otherwise do the next scale pass
+							else:
+								scalepass+=1
+													
+						# calculate final texture size
+						nsw=int(ow*factor)
+						nsh=int(oh*factor)
+						ms=maxsize
+						bl=blur
+						co=contrast
+						br=brightness
+						sh=sharpen
 						
-					# scae alphamap, if there is alpha
-					if(alpha):
-						
-						# convert alphamap to 8bit greyscale to increase processing speed (it's greyscale only)
-						alpha = alpha.convert("L")
-										
-						# only perform this if alpha optimizations are desired
-						if(alphaoptimize):
-						
-							# apply gaussian blur
-							if(bl!=0):
-								write_log("- Alphamap: Gaussian Blur")
-								alpha = alpha.filter(ImageFilter.GaussianBlur(bl))
-								
-							# apply brightness
-							if(br!=0.0):
-								write_log("- Alphamap: Brightness")
-								alpha = ImageEnhance.Brightness(alpha).enhance(1.0+br)
+						# rtcw/et excludes and default settings for specific folder names
+						if(rtcwexcludes):
 
-							# apply contrast
-							if(co!=0.0):
-								write_log("- Alphamap: Contrast")
-								alpha = ImageEnhance.Contrast(alpha).enhance(1.0+co)
-						
-						# # scale alpha to desired resolution
+							# limit general font size to 1024 and use different values for blur/contrast/brightness/sharpen
+							if("font" in dirName):
+								ms=1024
+								sh=4
+								bl=1
+								co=2.0
+								br=-0.5
+								write_log("- Font Texture found, limiting size to "+str(ms)+" Pixel")
+								
+							# limit ET HUD font size to 1024 and use different values for blur/contrast/brightness/sharpen
+							if("hudchars" in filename):
+								ms=1024
+								sh=4
+								bl=0
+								co=4.0
+								br=-0.5
+								write_log("- Font Texture found, limiting size to "+str(ms)+" Pixel")
+								
+							# limit leveshots image size to 1024
+							if("levelshots" in dirName):
+								ms=512
+								# but the survey map can still be large
+								if("_cc") in filename:
+									ms=maxsize
+								write_log("- Levelshot Texture found, limiting size to "+str(ms)+" Pixel")
+							
+							# limit lightmaps image size to 1024
+							if("maps" in dirName):
+								ms=1024
+								write_log("- Lightmap Texture found, limiting size to "+str(ms)+" Pixel")
+							
+							# dont' add contrast to the skies and user different blur value
+							folders=["skies","sfx","liquids"]
+							if(dirName in folders):
+							#if(("skies" in dirName) or ("sfx" in dirName) or ("liquids" in dirName)):
+								co=0.0
+								br=0.0
+								bl=2
+								write_log("- Blurry Alpha Texture found - no contrast or brightness change!")
+
+
+						# optional: sharpen filter
+						if(usesharpen and sh!=0):
+							
+							# don't sharpen lightmaps!
+							if ("maps" in dirName):				
+								write_log("- Lightmap texture found, no sharpen on lightmaps")
+							else:
+								write_log("- Colormap: Sharpen")
+								im=ImageEnhance.Sharpness(im).enhance(sh)
+								
+						# # if texture size is too large? reduce by factor
+						# if(nsw>ms) or (nsh>ms):
+						# 	f=min(ms/nsw,ms/nsh) // downfactor
+						# 	sw=int(nsw*f)
+						# 	sh=int(nsh*f)
+						# # or use the calculated values
+						# else:
+						# 	sw=nsw // downfactor
+						# 	sh=nsh // downfactor
+									
+						# # scale colormap to desired resolution
 						# if sw != nsw or sh != nsh:
-						# 	write_log("- Alphamap scaled to "+str(sw)+"x"+str(sh))
-						# 	alpha=alpha.resize((sw,sh),downscaling)
+						# 	write_log("- Colormap: downscaled to "+str(sw)+"x"+str(sh))
+						# 	im=im.resize((sw,sh),downscaling)
+							
+						# scae alphamap, if there is alpha
+						if(alpha):
+							
+							# convert alphamap to 8bit greyscale to increase processing speed (it's greyscale only)
+							alpha = alpha.convert("L")
+											
+							# only perform this if alpha optimizations are desired
+							if(alphaoptimize):
+							
+								# apply gaussian blur
+								if(bl!=0):
+									write_log("- Alphamap: Gaussian Blur")
+									alpha = alpha.filter(ImageFilter.GaussianBlur(bl))
+									
+								# apply brightness
+								if(br!=0.0):
+									write_log("- Alphamap: Brightness")
+									alpha = ImageEnhance.Brightness(alpha).enhance(1.0+br)
 
-						# merge alpha channel with RGB
-						write_log("- Merging Colormap with Alphamap")
-						im.putalpha(alpha.split()[-1])
-					
-					# save file
-					write_log("- Replacing original Texture")
-					if ext == ".dds":
-						# imblob = io.BytesIO()
-						# im.save(imblob, format='PNG')
-						# with Wimage(blob=imblob.getvalue()) as im:
-						# 	im.format = 'dds'
-						# 	im.compression = 'dxt5'
-						# 	im.save(filename=fullname)
-						im.save(fullname+'.png',quality=jpegquality,optimize=True,progressive=True)
-						im.close()
-						identify = subprocess.run(['magick', 'convert', fullname, 'json:-'], capture_output=True)
-						metadata = json.loads(identify.stdout)[0]['image']
-						if not metadata['channelDepth'].get('alpha'):
-							compression = 15 # bc1 (dxt1)
-						elif metadata['channelDepth']['alpha'] == 1:
-							compression = 16 # bc1a (dxt1a)
-						elif metadata['compression'] == 'DXT1':
-							compression = 15 # bc1 (dxt1)
-						elif metadata['compression'] == 'DXT3':
-							compression = 17 # bc2 (dxt2, dxt3)
-						elif metadata['compression'] == 'DXT5':
-							compression = 18 # bc3 (dxt4, dxt5)
+								# apply contrast
+								if(co!=0.0):
+									write_log("- Alphamap: Contrast")
+									alpha = ImageEnhance.Contrast(alpha).enhance(1.0+co)
+							
+							# # scale alpha to desired resolution
+							# if sw != nsw or sh != nsh:
+							# 	write_log("- Alphamap scaled to "+str(sw)+"x"+str(sh))
+							# 	alpha=alpha.resize((sw,sh),downscaling)
+
+							# merge alpha channel with RGB
+							write_log("- Merging Colormap with Alphamap")
+							im.putalpha(alpha.split()[-1])
+						
+						# save file
+						write_log("- Replacing original Texture")
+						if ext.lower() == ".dds":
+							# imblob = io.BytesIO()
+							# im.save(imblob, format='PNG')
+							# with Wimage(blob=imblob.getvalue()) as im:
+							# 	im.format = 'dds'
+							# 	im.compression = 'dxt5'
+							# 	im.save(filename=fullname)
+							im.save(fullname+'.png',quality=jpegquality,optimize=True,progressive=True)
+							im.close()
+							identify = subprocess.run(['magick', 'convert', fullname, 'json:-'], capture_output=True)
+							metadata = json.loads(identify.stdout)[0]['image']
+							if not metadata['channelDepth'].get('alpha'):
+								compression = 15 # bc1 (dxt1)
+							elif metadata['channelDepth']['alpha'] == 1:
+								compression = 16 # bc1a (dxt1a)
+							elif metadata['compression'] == 'DXT1':
+								compression = 15 # bc1 (dxt1)
+							elif metadata['compression'] == 'DXT3':
+								compression = 17 # bc2 (dxt2, dxt3)
+							elif metadata['compression'] == 'DXT5':
+								compression = 18 # bc3 (dxt4, dxt5)
+							else:
+								compression = 18 # bc3 (dxt4, dxt5)
+							write_log(f"  - Compressing DDS texture as {['DXT1','DXT1a','DXT3','DXT5'][compression - 15]}")
+							nvtt_command = [
+								'C:\\Program Files\\NVIDIA Corporation\\NVIDIA Texture Tools Exporter\\nvtt_export.exe',
+								f'-f{compression}', # bc1=15, bc1a=16, bc2=17, bc3=18, bc3n=19, bc4=20, bc5=21, bc6=22, bc7=23
+								'-q3', # fastest=0, highest=3
+								f'--cutout-alpha={compression==16}', # threhold transparency (instead of semi-transparent to fully opaque)
+								f'--scale-alpha={compression==16}', # more accurate cutout for mipmaps with cutout alpha
+								'-o', fullname, # output filename
+								fullname+'.png' # input filename
+								]
+							subprocess.run(nvtt_command)
+							os.remove(fullname+'.png')
 						else:
-							compression = 18 # bc3 (dxt4, dxt5)
-						write_log(f"  - Compressing DDS texture as {['DXT1','DXT1a','DXT3','DXT5'][compression - 15]}")
-						nvtt_command = [
-							'C:\\Program Files\\NVIDIA Corporation\\NVIDIA Texture Tools Exporter\\nvtt_export.exe',
-							f'-f{compression}', # bc1=15, bc1a=16, bc2=17, bc3=18, bc3n=19, bc4=20, bc5=21, bc6=22, bc7=23
-							'-q3', # fastest=0, highest=3
-							f'--cutout-alpha={compression==16}', # threhold transparency (instead of semi-transparent to fully opaque)
-							f'--scale-alpha={compression==16}', # more accurate cutout for mipmaps with cutout alpha
-							'-o', fullname, # output filename
-							fullname+'.png' # input filename
-							]
-						subprocess.run(nvtt_command)
-						os.remove(fullname+'.png')
-					else:
-						im.save(fullname,quality=jpegquality,optimize=True,progressive=True)
-						im.close()
-					write_log("- Conversion completed in "+str(hms_string(time.time()-stime)))
-				
-		else:
-			# remove all other files
-			delete = False if fname == '.gitignore' else True
+							im.save(fullname,quality=jpegquality,optimize=True,progressive=True)
+							im.close()
+						write_log("- Conversion completed in "+str(hms_string(time.time()-stime)))
+					
+			else:
+				# remove all other files
+				delete = False if fname == '.gitignore' else True
 
-		# delete files if flagged for deletion
-		if(delete==True):
-			write_log("----------------------------------------------------------------------")
-			write_log("- DELETED "+path+" ("+delreason+")")
-			os.remove(path)
-			dcnt+=1
+			# delete files if flagged for deletion
+			if(delete==True):
+				write_log("----------------------------------------------------------------------")
+				write_log("- DELETED "+path+" ("+delreason+")")
+				os.remove(path)
+				dcnt+=1
+
+		except Exception: # generic unhandled crash handler, part 2 (fixme: that's really sloppy! don't do this!)
+			traceback.print_exc(file=sys.stderr)
+			with open("last_filename_before_crash.log", "w") as f:
+				f.write(fullname)
+			sys.exit(1)
 			
 # finish
 write_log("----------------------------------------------------------------------")
